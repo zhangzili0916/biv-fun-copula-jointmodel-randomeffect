@@ -787,3 +787,109 @@ dynabi=function(beta1,beta2,D11,D22,D12,etapar,lambda,sigma,alpha,etaord,data,dy
   results=list(bihat,c(mubiconyi))
   return(results)
 }
+
+
+#predict survival probabilities
+predSur=function(beta1,beta2,D11,D22,D12,etapar,lambda,sigma,alpha,etaord,data,dynati,predinterv,m,tmax,acc,copula,nu,mtool)
+{
+  timepoint=data$ti
+  ni=length(timepoint)
+  D=matrix(c(D11,D12,D12,D22),ncol=2)
+  Xi1=matrix(c(rep(1,ni),timepoint,data$treat,data$gender,data$middle,data$young),ncol=6)
+  Zi1=matrix(c(rep(1,ni),timepoint),ncol=2)
+  Xi2=c(unique(data$treat),unique(data$gender),unique(data$middle),unique(data$young))
+  ti=seq(min(dynati,unique(data$obsti)),predinterv,by=acc)
+  dimyi=sum(timepoint<=min(dynati,unique(data$obsti)))
+  outbi=dynabi(beta1=beta1,beta2=beta2,D11=D11,D22=D22,D12=D12,etapar=etapar,lambda=lambda,sigma=sigma,
+               alpha=alpha,etaord=etaord,data=data,dynati=dynati,m=m,tmax=tmax,copula=copula,nu=nu,mtool=mtool)
+  hatbi=outbi[[1]]
+  hatbiconyi=outbi[[2]]
+  Ci=lambda*exp(c(Xi2%*%beta2)+alpha*hatbi[1])
+  Sicon=exp(-Ci/(alpha*hatbi[2])*(exp(alpha*hatbi[2]*ti)-exp(alpha*hatbi[2]*timepoint[dimyi]))) 
+  if(copula=="Gaucop")
+  {
+    etaty=eval.basis(timepoint,create.bspline.basis(c(0,tmax+0.2),nbasis=length(etapar),norder=etaord))%*%etapar
+    rhoty=(exp(2*etaty)-1)/(exp(2*etaty)+1)
+    Zyi=(data$resp-Xi1%*%beta1-Zi1%*%hatbi)[dimyi,]/sigma
+    muticonyibi=rhoty[dimyi]*Zyi
+    sigmaticonyibi=sqrt(1-rhoty[dimyi]^2)
+    predi=pnorm((qnorm(Sicon)+muticonyibi)/sigmaticonyibi)/pnorm((qnorm(Sicon[1])+muticonyibi)/sigmaticonyibi)
+  }
+  if (copula=="tcop")
+  {
+    etaty=eval.basis(timepoint,create.bspline.basis(c(0,tmax+0.2),nbasis=length(etapar),norder=etaord))%*%etapar
+    rhoty=(exp(2*etaty)-1)/(exp(2*etaty)+1)
+    Wyi=qt(pnorm((data$resp-Xi1%*%beta1-Zi1%*%hatbi)[dimyi,]/sigma),df=nu)
+    muticonyibi=rhoty[dimyi]*Wyi
+    sigmaticonyibi=sqrt((nu+Wyi^2)*(1-rhoty[dimyi]^2)/(nu+1))
+    predi=pt((qt(Sicon,df=nu)+muticonyibi)/sigmaticonyibi,df=nu+1)/pt((qt(Sicon[1],df=nu)+muticonyibi)/sigmaticonyibi,df=nu+1)
+  }
+  if(copula=="uncor")
+  {
+    predi=Sicon/Sicon[1]
+  }
+  results=list(ti,Sicon/Sicon[1],predi,dimyi,hatbi,hatbiconyi)
+  return(results)
+}
+
+#calculate AUC and PE for censored data
+
+#function for providing some imputs for "dynaAUC.cen" and "dynaPE.cen" functions later on.
+dynasurgroup.cen=function(Data,beta1,beta2,D11,D22,D12,etapar,lambda,sigma,alpha,etaord,dynati,predinterv,m,
+                          tmax,copula,nu,mtool)
+{
+  allprob=0
+  j=0
+  i=1
+  ind=0
+  obst=0
+  for(i in unique(Data$subj))
+  {
+    Datai=Data[Data$subj==i,]
+    obsti=unique(Datai$obsti)
+    indi=unique(Datai$indicator)
+    if(obsti>dynati)
+    {
+      j=j+1
+      allprob[j]=predSur(beta1=beta1,beta2=beta2,D11=D11,D22=D22,D12=D12,etapar=etapar,lambda=lambda,
+                            sigma=sigma,alpha=alpha,etaord=etaord,data=Datai,dynati=dynati,
+                            predinterv=predinterv,m=m,tmax=tmax,acc=predinterv-dynati,copula=copula,nu=nu,mtool=mtool)[[3]][-1]
+      ind[j]=indi;obst[j]=obsti
+    }
+  }
+  results=list(j,allprob,ind,obst)
+  return(results)
+}
+
+#function for calculate AUC
+dynaAUC.cen=function(probs,ind,obst,dynati,predinterv)
+{
+  upcount=0;lowcount=0
+  for(i in 1:length(probs))
+  {
+    if(obst[i]<=predinterv&obst[i]>dynati&ind[i]==1)
+    {
+      upcount=sum((obst>predinterv)*(probs[i]<probs))+sum((obst>obst[i]&obst<=predinterv&ind==0)*(probs[i]<probs)*probs)+
+        upcount
+      lowcount=sum(obst>predinterv)+sum((obst>obst[i]&obst<=predinterv&ind==0)*probs)+lowcount
+    }
+    if(obst[i]<=predinterv&obst[i]>dynati&ind[i]==0)
+    {
+      upcount=sum((obst>predinterv)*(probs[i]<probs)*(1-probs[i]))+
+        sum((obst>obst[i]&obst<=predinterv&ind==0)*(probs[i]<probs)*(1-probs[i])*probs)+upcount
+      lowcount=sum((obst>predinterv)*(1-probs[i]))+sum((obst>obst[i]&obst<=predinterv&ind==0)*(1-probs[i])*probs)+
+        lowcount
+    }
+  }
+  return(upcount/lowcount)
+}
+
+
+#function for calculate PE
+dynaPE.cen=function(probs,ind,obst,dynati,predinterv)
+{
+     upcount=sum((obst>predinterv)*(1-probs)^2+ind*(obst<predinterv)*(0-probs)^2+(1-ind)*(obst<predinterv)*
+                   (probs*(1-probs)^2+(1-probs)*(0-probs)^2))
+    lowcount=sum(obst>dynati)
+  return(upcount/lowcount)
+}
