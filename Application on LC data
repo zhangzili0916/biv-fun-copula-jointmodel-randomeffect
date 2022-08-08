@@ -1,0 +1,1064 @@
+library(pracma)
+library(cubature)
+library(expm)
+library("copula")
+library(CVTuningCov)
+library(JM)
+library(joineR)
+library(nlme)
+library("abind")
+library("magic")
+library("matrixcalc")
+library(Deriv)
+library(mvtnorm)
+library(emdbook)
+library(latex2exp)
+library(tikzDevice)
+library(fda)
+library(VineCopula)
+
+GaussianHermite <- function(r)
+{
+  esp <- 3.0e-14
+  pim4 <- 1/sqrt(sqrt(pi)) 	
+  maxit <- 1000
+  x <- w <- rep(0,r) 
+  m <- (r+1 - ((r+1)%%2))/2
+  p <- 2*r
+  q <- 2*r+1
+  for(i in 1:m){
+    if(i==1) z <- sqrt(q) -1.85575*q^(-.1667)
+    if(i==2) z <- z-1.14^((.425)/z)
+    if(i==3) z <- 1.86*z - 0.86*x[1]
+    if(i==4) z <- 1.91*z - 0.91*x[2]
+    if(i!=1 & i!=2 & i!=3 & i!=4)  z <- 2*z - x[i-2]
+    its <- 1
+    dif <- 1
+    while(its<maxit & dif>esp){
+      p1 <- pim4
+      p2 <- 0
+      for(j in 1:r){
+        p3 <- p2
+        p2 <- p1
+        p1 <- z*sqrt(2/j)*p2 - sqrt((j-1)/j)*p3
+      }
+      pp <- sqrt(p)*p2
+      z <- z - p1/pp
+      dif <- abs(p1/pp)
+      its <- its +1
+    }
+    x[i] <- z
+    x[r+1-i] <- -z
+    w[i] <- 2/(pp^2)
+    w[r+1-i] <- w[i]
+  }
+  return(list(round(w,15),round(x,15)))
+}
+
+
+liver$treat2=1-liver$treatment    #placebo=0, prednisone=1
+
+LC.long=liver[,c("id","prothrombin","time")]
+LC.surv= UniqueVariables(liver,
+                         var.col = c("survival", "cens"),
+                         id.col = "id")
+LC.cov =UniqueVariables(liver,
+                        c("treat2"),
+                        id.col = "id")
+LC.jd=jointdata(longitudinal = LC.long,
+                baseline = LC.cov,
+                survival = LC.surv,
+                id.col = "id",
+                time.col = "time")
+LCfit <- joint(data =LC.jd,
+               long.formula = prothrombin~ time+treat2,
+               surv.formula = Surv(survival,cens) ~ treat2,
+               model = "intslope",sepassoc=F)
+
+
+#76.7270941+0.4405909*t is the linear population mean trajectory from "joint" function, transfer it into linear
+#combination of B-spline basis functions
+reverseLCmu.linear=function(nmu,n,tmax,muord)
+{
+  mu=76.7270941+0.4405909*seq(0,tmax,length=n)
+  Phi=eval.basis(seq(0,tmax,length=n),create.bspline.basis(c(0,tmax),nmu,muord))
+  return(solve(t(Phi)%*%Phi)%*%t(Phi)%*%mu)
+}
+
+#log-likelihood for the functional bivariate Gaussian copula joint model
+appLCbivGaucoploglik.funrhoty.mu=function(theta,data,m,neta,nmu,etaord,muord,nlam,tmax)
+{
+  beta1=theta[1]
+  beta2=theta[2]
+  D11=theta[3]
+  D22=theta[4]
+  D12=theta[5]
+  etapar=theta[6:(5+neta)]
+  lambda=theta[(6+neta):(5+neta+nlam)]
+  sigma=theta[6+neta+nlam]
+  alpha=theta[7+neta+nlam]
+  mupar=theta[(8+neta+nlam):(7+neta+nlam+nmu)]
+  n=length(unique(data$id))
+  a=GaussianHermite(m)[[2]]
+  w=GaussianHermite(m)[[1]]
+  D=matrix(c(D11,D12,D12,D22),ncol=2)
+  ll=-1.0e40
+  if(sigma>0&sum(lambda>rep(0,nlam))==nlam&is.positive.definite(D)>0)
+  {
+    ll=0
+    for(sub in unique(data$id))
+    {
+      timepoint=data$time[data$id==sub]
+      etaty=eval.basis(timepoint,create.bspline.basis(c(0,tmax),nbasis=neta,norder=etaord))%*%etapar
+      rhoty=(exp(2*etaty)-1)/(exp(2*etaty)+1)
+      ni=length(timepoint)
+      Xi1=matrix(c(data$treat2[data$id==sub]),ncol=1)
+      Zi1=matrix(c(rep(1,ni),timepoint),ncol=2)
+      Xi2=c(unique(data$treat2[data$id==sub]))
+      obsti=unique(data$survival[data$id==sub])
+      indi=unique(data$cens[data$id==sub])
+      V11=Zi1%*%D%*%t(Zi1)+sigma^2*diag(ni)
+      V22=D
+      V12=Zi1%*%D
+      V21=t(V12)
+      mu=eval.basis(timepoint,create.bspline.basis(c(0,tmax),nbasis=nmu,norder=muord))%*%mupar
+      mubiconyi=V21%*%solve(V11)%*%(data$prothrombin[data$id==sub]-Xi1%*%beta1-mu)
+      Sigmabiconyi=V22-V21%*%solve(V11)%*%V12
+      roti1=matrix(c(cos(pi/4),sin(pi/4),-sin(pi/4),cos(pi/4)),ncol=2)
+      roti=eigen(Sigmabiconyi)$vector%*%diag(sqrt(eigen(Sigmabiconyi)$value))%*%roti1
+      bij=sqrt(2)*roti%*%t(as.matrix(expand.grid(a,a)))+c(mubiconyi)
+      wij=expand.grid(w,w)[,1]*expand.grid(w,w)[,2]/pi
+      Cij=lambda%*%t(exp(c(Xi2%*%beta2)+alpha*bij[1,]))
+      numbasi=sum(obsti>seq(0,max(data$survival),length=nlam+1))
+      nodei=c(seq(0,max(data$survival),length=nlam+1)[1:numbasi],obsti)
+      Zyij=(matrix(rep(data$prothrombin[data$id==sub],m^2),ncol=m^2)-matrix(rep(Xi1%*%beta1+mu,m^2),ncol=m^2)-Zi1%*%bij)/sigma
+      postijcondimean=1
+      Sij0=1
+      if(timepoint[1]>0)
+      {
+        nodei0=c(0,nodei[nodei>0][which(nodei[nodei>0] %in% nodei[nodei<timepoint[1]])],timepoint[1])
+        numbasi0=length(nodei0)-1
+        lownumbasi0=sum(0>=nodei)
+        upnumbasi0=sum(timepoint[1]>nodei)
+        Sij0=exp(colSums(-Cij[lownumbasi0:upnumbasi0,]/(matrix(rep(alpha*bij[2,],numbasi0),byrow=T,nrow=numbasi0))*
+                           (exp(nodei0[2:(numbasi0+1)]%*%t(alpha*bij[2,]))-exp(nodei0[1:numbasi0]%*%t(alpha*bij[2,]))))) 
+      } 
+      if(ni>1)
+      {
+        for(k in 1:(ni-1))
+        {
+          nodeik=c(timepoint[k],nodei[nodei>timepoint[k]][which(nodei[nodei>timepoint[k]] %in% nodei[nodei<timepoint[k+1]])],timepoint[k+1])
+          numbasik=length(nodeik)-1
+          lownumbasik=sum(timepoint[k]>=nodei)
+          upnumbasik=sum(timepoint[k+1]>nodei)
+          Sijk=exp(colSums(-Cij[lownumbasik:upnumbasik,]/(matrix(rep(alpha*bij[2,],numbasik),byrow=T,nrow=numbasik))*
+                             (exp(nodeik[2:(numbasik+1)]%*%t(alpha*bij[2,]))-exp(nodeik[1:numbasik]%*%t(alpha*bij[2,])))))
+          Zyijk=Zyij[k,]
+          mutijkcon=rhoty[k]*Zyijk
+          sigmatijkcon=sqrt(1-rhoty[k]^2)
+          ftijkcon=pnorm((qnorm(Sijk)+mutijkcon)/sigmatijkcon)
+          postijcondimean=ftijkcon*postijcondimean  
+        }
+      }
+      hijni=Cij[numbasi,]*exp(alpha*bij[2,]*obsti)
+      if(obsti!=timepoint[ni])
+      {
+        nodeini=c(timepoint[ni],nodei[nodei>timepoint[ni]][which(nodei[nodei>timepoint[ni]] %in% nodei[nodei<obsti])],obsti)
+        numbasini=length(nodeini)-1
+        lownumbasini=sum(timepoint[ni]>=nodei)
+        upnumbasini=numbasi
+        Sijni=exp(colSums(-Cij[lownumbasini:upnumbasini,]/(matrix(rep(alpha*bij[2,],numbasini),byrow=T,nrow=numbasini))*
+                            (exp(nodeini[2:(numbasini+1)]%*%t(alpha*bij[2,]))-exp(nodeini[1:numbasini]%*%t(alpha*bij[2,])))))
+        fijni=hijni*Sijni
+        Zyijni=Zyij[ni,]
+        mutijnicon=rhoty[ni]*Zyijni
+        sigmatijnicon=sqrt(1-rhoty[ni]^2)
+        ftijnicon=indi*dnorm(-qnorm(Sijni),mutijnicon,sigmatijnicon)*fijni/dnorm(-qnorm(Sijni))+
+          (1-indi)*(pnorm((qnorm(Sijni)+mutijnicon)/sigmatijnicon))
+      } else { Sijni=1
+      fijni=hijni*Sijni
+      ftijnicon=indi*fijni+(1-indi)*Sijni}
+      posticondimean=sum(wij*postijcondimean*ftijnicon*Sij0)
+      ll=ll+(-ni/2*log(2*pi)-0.5*log(det(V11))-0.5*t((data$prothrombin[data$id==sub]-Xi1%*%beta1-mu))%*%
+               solve(V11)%*%(data$prothrombin[data$id==sub]-Xi1%*%beta1-mu)+log(posticondimean))
+    }
+  }
+  if(is.na(ll)) ll=-1.0e40
+  if(abs(ll)==Inf) ll=-1.0e40
+  return(-ll)
+}
+
+#log-likelihood for the regular joint model.
+appLCbivGaucoploglik.0rhoty.funmu=function(theta,data,m,nmu,muord,nlam,tmax)
+{
+  beta1=theta[1]
+  beta2=theta[2]
+  D11=theta[3]
+  D22=theta[4]
+  D12=theta[5]
+  lambda=theta[6:(5+nlam)]
+  sigma=theta[6+nlam]
+  alpha=theta[7+nlam]
+  mupar=theta[(8+nlam):(7+nlam+nmu)]
+  n=length(unique(data$id))
+  a=GaussianHermite(m)[[2]]
+  w=GaussianHermite(m)[[1]]
+  D=matrix(c(D11,D12,D12,D22),ncol=2)
+  ll=-1.0e40
+  if(sigma>0&sum(lambda>rep(0,nlam))==nlam&is.positive.definite(D)>0)
+  {
+    ll=0
+    for(sub in unique(data$id))
+    {
+      timepoint=data$time[data$id==sub]
+      ni=length(timepoint)
+      Xi1=matrix(c(data$treat2[data$id==sub]),ncol=1)
+      Zi1=matrix(c(rep(1,ni),timepoint),ncol=2)
+      Xi2=c(unique(data$treat2[data$id==sub]))
+      obsti=unique(data$survival[data$id==sub])
+      indi=unique(data$cens[data$id==sub])
+      V11=Zi1%*%D%*%t(Zi1)+sigma^2*diag(ni)
+      V22=D
+      V12=Zi1%*%D
+      V21=t(V12)
+      mu=eval.basis(timepoint,create.bspline.basis(c(0,tmax),nbasis=nmu,norder=muord))%*%mupar
+      mubiconyi=V21%*%solve(V11)%*%(data$prothrombin[data$id==sub]-Xi1%*%beta1-mu)
+      Sigmabiconyi=V22-V21%*%solve(V11)%*%V12
+      roti1=matrix(c(cos(pi/4),sin(pi/4),-sin(pi/4),cos(pi/4)),ncol=2)
+      roti=eigen(Sigmabiconyi)$vector%*%diag(sqrt(eigen(Sigmabiconyi)$value))%*%roti1
+      bij=sqrt(2)*roti%*%t(as.matrix(expand.grid(a,a)))+c(mubiconyi)
+      wij=expand.grid(w,w)[,1]*expand.grid(w,w)[,2]/pi
+      Cij=lambda%*%t(exp(c(Xi2%*%beta2)+alpha*bij[1,]))
+      numbasi=sum(obsti>seq(0,max(data$survival),length=nlam+1))
+      nodei=c(seq(0,max(data$survival),length=nlam+1)[1:numbasi],obsti)
+      postijcondimean=1
+      Sij0=1
+      if(timepoint[1]>0)
+      {
+        nodei0=c(0,nodei[nodei>0][which(nodei[nodei>0] %in% nodei[nodei<timepoint[1]])],timepoint[1])
+        numbasi0=length(nodei0)-1
+        lownumbasi0=sum(0>=nodei)
+        upnumbasi0=sum(timepoint[1]>nodei)
+        Sij0=exp(colSums(-Cij[lownumbasi0:upnumbasi0,]/(matrix(rep(alpha*bij[2,],numbasi0),byrow=T,nrow=numbasi0))*
+                           (exp(nodei0[2:(numbasi0+1)]%*%t(alpha*bij[2,]))-exp(nodei0[1:numbasi0]%*%t(alpha*bij[2,]))))) 
+      } 
+      if(ni>1)
+      {
+        for(k in 1:(ni-1))
+        {
+          nodeik=c(timepoint[k],nodei[nodei>timepoint[k]][which(nodei[nodei>timepoint[k]] %in% nodei[nodei<timepoint[k+1]])],timepoint[k+1])
+          numbasik=length(nodeik)-1
+          lownumbasik=sum(timepoint[k]>=nodei)
+          upnumbasik=sum(timepoint[k+1]>nodei)
+          Sijk=exp(colSums(-Cij[lownumbasik:upnumbasik,]/(matrix(rep(alpha*bij[2,],numbasik),byrow=T,nrow=numbasik))*
+                             (exp(nodeik[2:(numbasik+1)]%*%t(alpha*bij[2,]))-exp(nodeik[1:numbasik]%*%t(alpha*bij[2,])))))
+          postijcondimean=Sijk*postijcondimean  
+        }
+      }
+      hijni=Cij[numbasi,]*exp(alpha*bij[2,]*obsti)
+      if(obsti!=timepoint[ni])
+      {
+        nodeini=c(timepoint[ni],nodei[nodei>timepoint[ni]][which(nodei[nodei>timepoint[ni]] %in% nodei[nodei<obsti])],obsti)
+        numbasini=length(nodeini)-1
+        lownumbasini=sum(timepoint[ni]>=nodei)
+        upnumbasini=numbasi
+        Sijni=exp(colSums(-Cij[lownumbasini:upnumbasini,]/(matrix(rep(alpha*bij[2,],numbasini),byrow=T,nrow=numbasini))*
+                            (exp(nodeini[2:(numbasini+1)]%*%t(alpha*bij[2,]))-exp(nodeini[1:numbasini]%*%t(alpha*bij[2,])))))
+      } else {Sijni=1}
+      fijni=hijni*Sijni
+      ftijnicon=indi*fijni+(1-indi)*Sijni
+      posticondimean=sum(wij*postijcondimean*ftijnicon*Sij0)
+      ll=ll+(-ni/2*log(2*pi)-0.5*log(det(V11))-0.5*t((data$prothrombin[data$id==sub]-Xi1%*%beta1-mu))%*%
+               solve(V11)%*%(data$prothrombin[data$id==sub]-Xi1%*%beta1-mu)+log(posticondimean))
+    }
+  }
+  if(is.na(ll)) ll=-1.0e40
+  if(abs(ll)==Inf) ll=-1.0e40
+  return(-ll)
+}
+
+#log-likelihood for the regular joint model, this is equivalent to "appLCbivGaucoploglik.0rhoty.funmu"
+appLCbivGaucoploglik.uncor.funmu=function(theta,data,m,nmu,muord,nlam,tmax)
+{
+  beta1=theta[1]
+  beta2=theta[2]
+  D11=theta[3]
+  D22=theta[4]
+  D12=theta[5]
+  lambda=theta[6:(5+nlam)]
+  sigma=theta[6+nlam]
+  alpha=theta[7+nlam]
+  mupar=theta[(8+nlam):(7+nlam+nmu)]
+  n=length(unique(data$id))
+  a=GaussianHermite(m)[[2]]
+  w=GaussianHermite(m)[[1]]
+  D=matrix(c(D11,D12,D12,D22),ncol=2)
+  ll=-1.0e40
+  if(sigma>0&sum(lambda>rep(0,nlam))==nlam&is.positive.definite(D)>0)
+  {
+    ll=0
+    for(sub in unique(data$id))
+    {
+      timepoint=data$time[data$id==sub]
+      ni=length(timepoint)
+      Xi1=matrix(c(data$treat2[data$id==sub]),ncol=1)
+      Zi1=matrix(c(rep(1,ni),timepoint),ncol=2)
+      Xi2=c(unique(data$treat2[data$id==sub]))
+      obsti=unique(data$survival[data$id==sub])
+      indi=unique(data$cens[data$id==sub])
+      V11=Zi1%*%D%*%t(Zi1)+sigma^2*diag(ni)
+      V22=D
+      V12=Zi1%*%D
+      V21=t(V12)
+      mu=eval.basis(timepoint,create.bspline.basis(c(0,tmax),nbasis=nmu,norder=muord))%*%mupar
+      mubiconyi=V21%*%solve(V11)%*%(data$prothrombin[data$id==sub]-Xi1%*%beta1-mu)
+      Sigmabiconyi=V22-V21%*%solve(V11)%*%V12
+      roti1=matrix(c(cos(pi/4),sin(pi/4),-sin(pi/4),cos(pi/4)),ncol=2)
+      roti=eigen(Sigmabiconyi)$vector%*%diag(sqrt(eigen(Sigmabiconyi)$value))%*%roti1
+      bij=sqrt(2)*roti%*%t(as.matrix(expand.grid(a,a)))+c(mubiconyi)
+      wij=expand.grid(w,w)[,1]*expand.grid(w,w)[,2]/pi
+      Cij=lambda%*%t(exp(c(Xi2%*%beta2)+alpha*bij[1,]))
+      numbasi=sum(obsti>seq(0,max(data$survival),length=nlam+1))
+      nodei=c(seq(0,max(data$survival),length=nlam+1)[1:numbasi],obsti)
+      Sij=exp(colSums(-Cij[1:numbasi,]/(matrix(rep(alpha*bij[2,],numbasi),byrow=T,nrow=numbasi))*
+                        (exp(nodei[2:(numbasi+1)]%*%t(alpha*bij[2,]))-exp(nodei[1:numbasi]%*%t(alpha*bij[2,])))))
+      hij=Cij[numbasi,]*exp(alpha*bij[2,]*obsti)
+      fij=hij*Sij
+      ftijcon=indi*fij+(1-indi)*Sij
+      posticondimean=sum(wij*ftijcon)
+      ll=ll+(-ni/2*log(2*pi)-0.5*log(det(V11))-0.5*t((data$prothrombin[data$id==sub]-Xi1%*%beta1-mu))%*%
+               solve(V11)%*%(data$prothrombin[data$id==sub]-Xi1%*%beta1-mu)+log(posticondimean))
+    }
+  }
+  if(is.na(ll)) ll=-1.0e40
+  if(abs(ll)==Inf) ll=-1.0e40
+  return(-ll)
+}
+
+#log-likelihood for the functional bivariate t copula joint model
+appLCbivtcoploglik.funrhoty.mu=function(theta,data,m,neta,nmu,etaord,muord,nlam,tmax,nu)  #switch ncop in report 6 to neta
+{
+  beta1=theta[1]
+  beta2=theta[2]
+  D11=theta[3]
+  D22=theta[4]
+  D12=theta[5]
+  etapar=theta[6:(5+neta)]
+  lambda=theta[(6+neta):(5+neta+nlam)]
+  sigma=theta[6+neta+nlam]
+  alpha=theta[7+neta+nlam]
+  mupar=theta[(8+neta+nlam):(7+neta+nlam+nmu)]
+  n=length(unique(data$id))
+  a=GaussianHermite(m)[[2]]
+  w=GaussianHermite(m)[[1]]
+  D=matrix(c(D11,D12,D12,D22),ncol=2)
+  ll=-1.0e40
+  if(sigma>0&sum(lambda>rep(0,nlam))==nlam&is.positive.definite(D)>0)
+  {
+    ll=0
+    for(sub in unique(data$id))
+    {
+      timepoint=data$time[data$id==sub]
+      etaty=eval.basis(timepoint,create.bspline.basis(c(0,tmax),nbasis=neta,norder=etaord))%*%etapar
+      rhoty=(exp(2*etaty)-1)/(exp(2*etaty)+1)
+      ni=length(timepoint)
+      Xi1=matrix(c(data$treat2[data$id==sub]),ncol=1)
+      Zi1=matrix(c(rep(1,ni),timepoint),ncol=2)
+      Xi2=c(unique(data$treat2[data$id==sub]))
+      obsti=unique(data$survival[data$id==sub])
+      indi=unique(data$cens[data$id==sub])
+      V11=Zi1%*%D%*%t(Zi1)+sigma^2*diag(ni)
+      V22=D
+      V12=Zi1%*%D
+      V21=t(V12)
+      mu=eval.basis(timepoint,create.bspline.basis(c(0,tmax),nbasis=nmu,norder=muord))%*%mupar
+      mubiconyi=V21%*%solve(V11)%*%(data$prothrombin[data$id==sub]-Xi1%*%beta1-mu)
+      Sigmabiconyi=V22-V21%*%solve(V11)%*%V12
+      roti1=matrix(c(cos(pi/4),sin(pi/4),-sin(pi/4),cos(pi/4)),ncol=2)
+      roti=eigen(Sigmabiconyi)$vector%*%diag(sqrt(eigen(Sigmabiconyi)$value))%*%roti1
+      bij=sqrt(2)*roti%*%t(as.matrix(expand.grid(a,a)))+c(mubiconyi)
+      wij=expand.grid(w,w)[,1]*expand.grid(w,w)[,2]/pi
+      Cij=lambda%*%t(exp(c(Xi2%*%beta2)+alpha*bij[1,]))
+      numbasi=sum(obsti>seq(0,max(data$survival),length=nlam+1))
+      nodei=c(seq(0,max(data$survival),length=nlam+1)[1:numbasi],obsti)
+      Wyij=qt(pnorm((matrix(rep(data$prothrombin[data$id==sub],m^2),ncol=m^2)-matrix(rep(Xi1%*%beta1+mu,m^2),ncol=m^2)-Zi1%*%bij)/sigma),df=nu)
+      postijcondimean=1
+      Sij0=1
+      if(timepoint[1]>0)
+      {
+        nodei0=c(0,nodei[nodei>0][which(nodei[nodei>0] %in% nodei[nodei<timepoint[1]])],timepoint[1])
+        numbasi0=length(nodei0)-1
+        lownumbasi0=sum(0>=nodei)
+        upnumbasi0=sum(timepoint[1]>nodei)
+        Sij0=exp(colSums(-Cij[lownumbasi0:upnumbasi0,]/(matrix(rep(alpha*bij[2,],numbasi0),byrow=T,nrow=numbasi0))*
+                           (exp(nodei0[2:(numbasi0+1)]%*%t(alpha*bij[2,]))-exp(nodei0[1:numbasi0]%*%t(alpha*bij[2,]))))) 
+      } 
+      if(ni>1)
+      {
+        for(k in 1:(ni-1))
+        {
+          nodeik=c(timepoint[k],nodei[nodei>timepoint[k]][which(nodei[nodei>timepoint[k]] %in% nodei[nodei<timepoint[k+1]])],timepoint[k+1])
+          numbasik=length(nodeik)-1
+          lownumbasik=sum(timepoint[k]>=nodei)
+          upnumbasik=sum(timepoint[k+1]>nodei)
+          Sijk=exp(colSums(-Cij[lownumbasik:upnumbasik,]/(matrix(rep(alpha*bij[2,],numbasik),byrow=T,nrow=numbasik))*
+                             (exp(nodeik[2:(numbasik+1)]%*%t(alpha*bij[2,]))-exp(nodeik[1:numbasik]%*%t(alpha*bij[2,])))))
+          Wyijk=Wyij[k,]
+          mutijkcon=rhoty[k]*Wyijk
+          sigmatijkcon=sqrt((nu+Wyijk^2)*(1-rhoty[k]^2)/(nu+1))
+          ftijkcon=pt((qt(Sijk,df=nu)+mutijkcon)/sigmatijkcon,df=nu+1)
+          postijcondimean=ftijkcon*postijcondimean  
+        }
+      }
+      hijni=Cij[numbasi,]*exp(alpha*bij[2,]*obsti)
+      if(obsti!=timepoint[ni])
+      {
+        nodeini=c(timepoint[ni],nodei[nodei>timepoint[ni]][which(nodei[nodei>timepoint[ni]] %in% nodei[nodei<obsti])],obsti)
+        numbasini=length(nodeini)-1
+        lownumbasini=sum(timepoint[ni]>=nodei)
+        upnumbasini=numbasi
+        Sijni=exp(colSums(-Cij[lownumbasini:upnumbasini,]/(matrix(rep(alpha*bij[2,],numbasini),byrow=T,nrow=numbasini))*
+                            (exp(nodeini[2:(numbasini+1)]%*%t(alpha*bij[2,]))-exp(nodeini[1:numbasini]%*%t(alpha*bij[2,])))))
+        fijni=hijni*Sijni
+        Wyijni=Wyij[ni,]
+        mutijnicon=rhoty[ni]*Wyijni
+        sigmatijnicon=sqrt((nu+Wyijni^2)*(1-rhoty[ni]^2)/(nu+1))
+        ftijnicon=indi*(dt((-qt(Sijni,df=nu)-mutijnicon)/sigmatijnicon,df=nu+1)/sigmatijnicon)*fijni/dt(-qt(Sijni,df=nu),df=nu)+
+          (1-indi)*pt((qt(Sijni,df=nu)+mutijnicon)/sigmatijnicon,df=nu+1)
+      } else { Sijni=1
+      fijni=hijni*Sijni
+      ftijnicon=indi*fijni+(1-indi)*Sijni }
+      posticondimean=sum(wij*postijcondimean*ftijnicon*Sij0)
+      ll=ll+(-ni/2*log(2*pi)-0.5*log(det(V11))-0.5*t((data$prothrombin[data$id==sub]-Xi1%*%beta1-mu))%*%
+               solve(V11)%*%(data$prothrombin[data$id==sub]-Xi1%*%beta1-mu)+log(posticondimean))
+    }
+  }
+  if(is.na(ll)) ll=-1.0e40
+  if(abs(ll)==Inf) ll=-1.0e40
+  return(-ll)
+}
+
+
+#get estimation from the regular joint model
+estLC.uncor.mu8.BS8.2ba.nlm=nlm(f=appLCbivGaucoploglik.uncor.funmu,p=c(-6.9358363,0.09659284,356.0200,15.8750,1.9433,
+                          rep(0.16,2),296.35848^0.5,-0.04080829,reverseLCmu.linear(nmu=8,n=21,tmax=max(liver$time),muord=8)),
+                          data=liver,nmu=8,muord=8,m=3,tmax=max(liver$time),nlam=2,hessian=T,iterlim=1000)
+estLC.0rhoty.mu8.BS8.2ba.nlm=nlm(f=appLCbivGaucoploglik.0rhoty.funmu,p=c(-6.9358363,0.09659284,356.0200,15.8750,1.9433,
+                          rep(0.16,2),296.35848^0.5,-0.04080829,reverseLCmu.linear(nmu=8,n=21,tmax=max(liver$time),muord=8)),
+                          data=liver,nmu=8,muord=8,m=3,tmax=max(liver$time),nlam=2,hessian=T,iterlim=1000)      
+
+#get estimation from the bivaraite functional Gaussian copula joint model 
+estLCGaucop.eta4.mu8.BS4.BS8.2ba.nlm=nlm(f=appLCbivGaucoploglik.funrhoty.mu,p=c(-6.9358363,0.09659284,356.0200,15.8750,1.9433,
+                          rep(0,4),rep(0.16,2),296.35848^0.5,-0.04080829,reverseLCmu.linear(nmu=8,n=21,tmax=max(liver$time),muord=8)),
+                          data=liver,neta=4,nmu=8,etaord=4,muord=8,m=3,tmax=max(liver$time),nlam=2,hessian=T,iterlim=1000)
+                          
+#get estimation from the bivaraite functional t copula joint model with df=10
+estLCt10cop.eta4.mu8.BS4.BS8.2ba.nlm=nlm(f=appLCbivtcoploglik.funrhoty.mu,p=c(-6.9358363,0.09659284,356.0200,15.8750,1.9433,rep(0,4),
+                          rep(0.16,2),296.35848^0.5,-0.04080829,reverseLCmu.linear(nmu=8,n=21,tmax=max(liver$time),muord=8)),
+                          data=liver,neta=4,nmu=8,etaord=4,muord=8,m=3,tmax=max(liver$time),nlam=2,nu=10,hessian=T,iterlim=1000) 
+                          
+                          
+#Dynamic prediction on liver data
+#posterior distribution of random effect bi, i.e., f(bi|ti,yi), for bivaraite functional Gaussian copula joint model
+fbiLCposGau=function(beta1,beta2,D11,D22,D12,etapar,lambda,sigma,alpha,mupar,muord,etaord,data,dynati,bi,m,tmax)
+{
+  timepoint=data$time
+  ni=length(timepoint)
+  D=matrix(c(D11,D12,D12,D22),ncol=2)
+  a=GaussianHermite(m)[[2]]
+  w=GaussianHermite(m)[[1]]
+  Xi1=matrix(c(data$treat2),ncol=1)
+  Zi1=matrix(c(rep(1,ni),timepoint),ncol=2)
+  Xi2=c(unique(data$treat2))
+  mu=eval.basis(timepoint,create.bspline.basis(c(0,tmax),nbasis=length(mupar),norder=muord))%*%mupar
+  etaty=eval.basis(timepoint,create.bspline.basis(c(0,tmax),nbasis=length(etapar),norder=etaord))%*%etapar
+  rhoty=(exp(2*etaty)-1)/(exp(2*etaty)+1)
+  event=unique(data$cens)
+  obsti=unique(data$survival)
+  if(dynati<obsti) {indi=0
+  ti=dynati} else {indi=event
+  ti=obsti}
+  dimyi=sum(timepoint<=ti)
+  V11=matrix(Zi1[1:dimyi,],ncol=2)%*%D%*%t(matrix(Zi1[1:dimyi,],ncol=2))+sigma^2*diag(dimyi)
+  V22=D
+  V12=matrix(Zi1[1:dimyi,],ncol=2)%*%D
+  V21=t(V12)
+  mubiconyi=V21%*%solve(V11)%*%(data$prothrombin-Xi1%*%beta1-mu)[1:dimyi,]
+  Sigmabiconyi=V22-V21%*%solve(V11)%*%V12
+  Ci=c(lambda,lambda[length(lambda)])*exp(c(Xi2%*%beta2)+alpha*bi[1])
+  numbasi=sum(ti>seq(0,max(liver$survival),length=length(lambda)+1))           
+  nodei=c(seq(0,max(liver$survival),length=length(lambda)+1)[1:numbasi],ti)
+  ftikconyibi=1
+  Si0=1
+  if(timepoint[1]>0)
+  {
+    nodei0=c(0,nodei[nodei>0][which(nodei[nodei>0] %in% nodei[nodei<timepoint[1]])],timepoint[1])
+    numbasi0=length(nodei0)-1
+    lownumbasi0=sum(0>=nodei)
+    upnumbasi0=sum(timepoint[1]>nodei)
+    Si0=exp(sum(-Ci[lownumbasi0:upnumbasi0,]/(alpha*bi[2])*
+                       (exp(nodei0[2:(numbasi0+1)]*alpha*bi[2])-exp(nodei0[1:numbasi0]*alpha*bij[2])))) 
+  } 
+  if(dimyi>1)
+  {
+    for(k in 1:(dimyi-1))
+    {
+      nodeik=c(timepoint[k],nodei[nodei>timepoint[k]][which(nodei[nodei>timepoint[k]] %in% nodei[nodei<timepoint[k+1]])],timepoint[k+1])
+      numbasik=length(nodeik)-1
+      lownumbasik=sum(timepoint[k]>=nodei)
+      upnumbasik=sum(timepoint[k+1]>nodei)
+      Sik=exp(sum(-Ci[lownumbasik:upnumbasik]/(alpha*bi[2])*(exp(alpha*bi[2]*nodeik[2:(numbasik+1)])-exp(alpha*bi[2]*nodeik[1:numbasik]))))   
+      Zyik=(data$prothrombin-Xi1%*%beta1-mu-Zi1%*%bi)[k,]/sigma
+      mutikconyibi=rhoty[k]*Zyik
+      sigmatikconyibi=sqrt(1-rhoty[k]^2)
+      Stikconyibi=pnorm((qnorm(Sik)+mutikconyibi)/sigmatikconyibi)
+      ftikconyibi=ftikconyibi*Stikconyibi 
+    }
+  }
+  hini=Ci[numbasi]*exp(alpha*bi[2]*ti)
+  if(ti!=timepoint[dimyi])
+  {
+    nodeini=c(timepoint[dimyi],nodei[nodei>timepoint[dimyi]][which(nodei[nodei>timepoint[dimyi]] %in% nodei[nodei<ti])],ti)
+    numbasini=length(nodeini)-1
+    lownumbasini=sum(timepoint[dimyi]>=nodei)
+    upnumbasini=numbasi
+    Sini=exp(sum(-Ci[lownumbasini:upnumbasini]/(alpha*bi[2])*(exp(alpha*bi[2]*nodeini[2:(numbasini+1)])-exp(alpha*bi[2]*nodeini[1:numbasini]))))
+    fini=hini*Sini
+    Zyini=(data$prothrombin-Xi1%*%beta1-mu-Zi1%*%bi)[dimyi,]/sigma
+    mutiniconyibi=rhoty[dimyi]*Zyini
+    sigmatiniconyibi=sqrt(1-rhoty[dimyi]^2)
+    ftiniconyibi=indi*dnorm(-qnorm(Sini),mutiniconyibi,sigmatiniconyibi)*fini/dnorm(-qnorm(Sini))+
+      (1-indi)*(pnorm((qnorm(Sini)+mutiniconyibi)/sigmatiniconyibi))
+  } else {Sini=1
+    ftiniconyibi=(1-event)*Sini+event*hini*Sini}
+  fticonyibi=ftikconyibi*ftiniconyibi*Si0
+  ftijkconyibi=1
+  roti1=matrix(c(cos(pi/4),sin(pi/4),-sin(pi/4),cos(pi/4)),ncol=2)
+  roti=eigen(Sigmabiconyi)$vector%*%diag(sqrt(eigen(Sigmabiconyi)$value))%*%roti1
+  bij=sqrt(2)*roti%*%t(as.matrix(expand.grid(a,a)))+c(mubiconyi)
+  wij=expand.grid(w,w)[,1]*expand.grid(w,w)[,2]/pi
+  Cij=c(lambda,lambda[length(lambda)])%*%t(exp(c(Xi2%*%beta2)+alpha*bij[1,]))
+  Sij0=1
+  if(timepoint[1]>0)
+  {
+    nodei0=c(0,nodei[nodei>0][which(nodei[nodei>0] %in% nodei[nodei<timepoint[1]])],timepoint[1])
+    numbasi0=length(nodei0)-1
+    lownumbasi0=sum(0>=nodei)
+    upnumbasi0=sum(timepoint[1]>nodei)
+    Sij0=exp(colSums(-Cij[lownumbasi0:upnumbasi0,]/(matrix(rep(alpha*bij[2,],numbasi0),byrow=T,nrow=numbasi0))*
+                       (exp(nodei0[2:(numbasi0+1)]%*%t(alpha*bij[2,]))-exp(nodei0[1:numbasi0]%*%t(alpha*bij[2,]))))) 
+  } 
+  if(dimyi>1)
+  {
+    for(k in 1:(dimyi-1))
+    {
+      nodeik=c(timepoint[k],nodei[nodei>timepoint[k]][which(nodei[nodei>timepoint[k]] %in% nodei[nodei<timepoint[k+1]])],timepoint[k+1])
+      numbasik=length(nodeik)-1
+      lownumbasik=sum(timepoint[k]>=nodei)
+      upnumbasik=sum(timepoint[k+1]>nodei)
+      Sijk=exp(colSums(-Cij[lownumbasik:upnumbasik,]/(matrix(rep(alpha*bij[2,],numbasik),byrow=T,nrow=numbasik))*
+                         (exp(nodeik[2:(numbasik+1)]%*%t(alpha*bij[2,]))-exp(nodeik[1:numbasik]%*%t(alpha*bij[2,])))))  
+      Zyijk=(matrix(rep(data$prothrombin,m^2),ncol=m^2)-matrix(rep(Xi1%*%beta1+mu,m^2),ncol=m^2)-Zi1%*%bij)[k,]/sigma
+      mutijkconyibi=rhoty[k]*Zyijk
+      sigmatijkconyibi=sqrt(1-rhoty[k]^2)
+      Stijkconyibi=pnorm((qnorm(Sijk)+mutijkconyibi)/sigmatijkconyibi)
+      ftijkconyibi=ftijkconyibi*Stijkconyibi 
+    }
+  }
+  hijni=Cij[numbasi,]*exp(alpha*bij[2,]*ti)
+  if(ti!=timepoint[dimyi])
+  {
+    nodeini=c(timepoint[dimyi],nodei[nodei>timepoint[dimyi]][which(nodei[nodei>timepoint[dimyi]] %in% nodei[nodei<ti])],ti)
+    numbasini=length(nodeini)-1
+    lownumbasini=sum(timepoint[dimyi]>=nodei)
+    upnumbasini=numbasi
+    Sijni=exp(colSums(-Cij[lownumbasini:upnumbasini,]/(matrix(rep(alpha*bij[2,],numbasini),byrow=T,nrow=numbasini))*
+                        (exp(nodeini[2:(numbasini+1)]%*%t(alpha*bij[2,]))-exp(nodeini[1:numbasini]%*%t(alpha*bij[2,])))))
+    fijni=hijni*Sijni  
+    Zyijni=(matrix(rep(data$prothrombin,m^2),ncol=m^2)-matrix(rep(Xi1%*%beta1+mu,m^2),ncol=m^2)-Zi1%*%bij)[dimyi,]/sigma
+    mutijniconyibi=rhoty[dimyi]*Zyijni
+    sigmatijniconyibi=sqrt(1-rhoty[dimyi]^2)
+    ftijniconyibi=indi*dnorm(-qnorm(Sijni),mutijniconyibi,sigmatijniconyibi)*fijni/dnorm(-qnorm(Sijni))+
+      (1-indi)*(pnorm((qnorm(Sijni)+mutijniconyibi)/sigmatijniconyibi))
+  } else {Sijni=1
+    ftijniconyibi=(1-event)*Sijni+event*hijni*Sijni}
+  fticonyi=sum(ftijkconyibi*ftijniconyibi*Sij0*wij)
+  fbiconyiti=fticonyibi*dmvnorm(bi,c(mubiconyi),Sigmabiconyi)/fticonyi
+  return(-fbiconyiti)
+}
+
+
+
+#posterior distribution of random effect bi, i.e., f(bi|ti,yi), for bivaraite functional t copula joint model
+fbiLCpostcop=function(beta1,beta2,D11,D22,D12,etapar,lambda,sigma,alpha,mupar,muord,etaord,data,dynati,bi,m,tmax,nu)
+{
+  timepoint=data$time
+  ni=length(timepoint)
+  D=matrix(c(D11,D12,D12,D22),ncol=2)
+  a=GaussianHermite(m)[[2]]
+  w=GaussianHermite(m)[[1]]
+  Xi1=matrix(c(data$treat2),ncol=1)
+  Zi1=matrix(c(rep(1,ni),timepoint),ncol=2)
+  Xi2=c(unique(data$treat2))
+  mu=eval.basis(timepoint,create.bspline.basis(c(0,tmax),nbasis=length(mupar),norder=muord))%*%mupar
+  etaty=eval.basis(timepoint,create.bspline.basis(c(0,tmax),nbasis=length(etapar),norder=etaord))%*%etapar
+  rhoty=(exp(2*etaty)-1)/(exp(2*etaty)+1)
+  event=unique(data$cens)
+  obsti=unique(data$survival)
+  if(dynati<obsti) {indi=0
+  ti=dynati} else {indi=event
+  ti=obsti}
+  dimyi=sum(timepoint<=ti)
+  V11=matrix(Zi1[1:dimyi,],ncol=2)%*%D%*%t(matrix(Zi1[1:dimyi,],ncol=2))+sigma^2*diag(dimyi)
+  V22=D
+  V12=matrix(Zi1[1:dimyi,],ncol=2)%*%D
+  V21=t(V12)
+  mubiconyi=V21%*%solve(V11)%*%(data$prothrombin-Xi1%*%beta1-mu)[1:dimyi,]
+  Sigmabiconyi=V22-V21%*%solve(V11)%*%V12
+  Ci=c(lambda,lambda[length(lambda)])*exp(c(Xi2%*%beta2)+alpha*bi[1])
+  numbasi=sum(ti>seq(0,max(liver$survival),length=length(lambda)+1))           
+  nodei=c(seq(0,max(liver$survival),length=length(lambda)+1)[1:numbasi],ti)
+  ftikconyibi=1
+  Si0=1
+  if(timepoint[1]>0)
+  {
+    nodei0=c(0,nodei[nodei>0][which(nodei[nodei>0] %in% nodei[nodei<timepoint[1]])],timepoint[1])
+    numbasi0=length(nodei0)-1
+    lownumbasi0=sum(0>=nodei)
+    upnumbasi0=sum(timepoint[1]>nodei)
+    Si0=exp(sum(-Ci[lownumbasi0:upnumbasi0,]/(alpha*bi[2])*
+                  (exp(nodei0[2:(numbasi0+1)]*alpha*bi[2])-exp(nodei0[1:numbasi0]*alpha*bij[2])))) 
+  } 
+  if(dimyi>1)
+  {
+    for(k in 1:(dimyi-1))
+    {
+      nodeik=c(timepoint[k],nodei[nodei>timepoint[k]][which(nodei[nodei>timepoint[k]] %in% nodei[nodei<timepoint[k+1]])],timepoint[k+1])
+      numbasik=length(nodeik)-1
+      lownumbasik=sum(timepoint[k]>=nodei)
+      upnumbasik=sum(timepoint[k+1]>nodei)
+      Sik=exp(sum(-Ci[lownumbasik:upnumbasik]/(alpha*bi[2])*(exp(alpha*bi[2]*nodeik[2:(numbasik+1)])-exp(alpha*bi[2]*nodeik[1:numbasik]))))
+      Wyik=qt(pnorm((data$prothrombin-Xi1%*%beta1-mu-Zi1%*%bi)[k,]/sigma),df=nu)
+      mutikconyibi=rhoty[k]*Wyik
+      sigmatikconyibi=sqrt((nu+Wyik^2)*(1-rhoty[k]^2)/(nu+1))
+      Stikconyibi=pt((qt(Sik,df=nu)+mutikconyibi)/sigmatikconyibi,df=nu+1)
+      ftikconyibi=ftikconyibi*Stikconyibi 
+    }
+  }
+  hini=Ci[numbasi]*exp(alpha*bi[2]*ti)
+  if(ti!=timepoint[dimyi])
+  {
+    nodeini=c(timepoint[dimyi],nodei[nodei>timepoint[dimyi]][which(nodei[nodei>timepoint[dimyi]] %in% nodei[nodei<ti])],ti)
+    numbasini=length(nodeini)-1
+    lownumbasini=sum(timepoint[dimyi]>=nodei)
+    upnumbasini=numbasi
+    Sini=exp(sum(-Ci[lownumbasini:upnumbasini]/(alpha*bi[2])*(exp(alpha*bi[2]*nodeini[2:(numbasini+1)])-exp(alpha*bi[2]*nodeini[1:numbasini]))))
+    fini=hini*Sini
+    Wyini=qt(pnorm((data$prothrombin-Xi1%*%beta1-mu-Zi1%*%bi)[dimyi,]/sigma),df=nu)
+    mutiniconyibi=rhoty[dimyi]*Wyini
+    sigmatiniconyibi=sqrt((nu+Wyini^2)*(1-rhoty[dimyi]^2)/(nu+1))
+    ftiniconyibi=indi*(dt((-qt(Sini,df=nu)-mutiniconyibi)/sigmatiniconyibi,df=nu+1)/sigmatiniconyibi)*fini/dt(-qt(Sini,df=nu),df=nu)+
+      (1-indi)*pt((qt(Sini,df=nu)+mutiniconyibi)/sigmatiniconyibi,df=nu+1)
+  } else  {Sini=1
+     ftiniconyibi=(1-event)*Sini+event*hini*Sini}
+  fticonyibi=ftikconyibi*ftiniconyibi*Si0
+  ftijkconyibi=1
+  roti1=matrix(c(cos(pi/4),sin(pi/4),-sin(pi/4),cos(pi/4)),ncol=2)
+  roti=eigen(Sigmabiconyi)$vector%*%diag(sqrt(eigen(Sigmabiconyi)$value))%*%roti1
+  bij=sqrt(2)*roti%*%t(as.matrix(expand.grid(a,a)))+c(mubiconyi)
+  wij=expand.grid(w,w)[,1]*expand.grid(w,w)[,2]/pi
+  Cij=c(lambda,lambda[length(lambda)])%*%t(exp(c(Xi2%*%beta2)+alpha*bij[1,]))
+  Sij0=1
+  if(timepoint[1]>0)
+  {
+    nodei0=c(0,nodei[nodei>0][which(nodei[nodei>0] %in% nodei[nodei<timepoint[1]])],timepoint[1])
+    numbasi0=length(nodei0)-1
+    lownumbasi0=sum(0>=nodei)
+    upnumbasi0=sum(timepoint[1]>nodei)
+    Sij0=exp(colSums(-Cij[lownumbasi0:upnumbasi0,]/(matrix(rep(alpha*bij[2,],numbasi0),byrow=T,nrow=numbasi0))*
+                       (exp(nodei0[2:(numbasi0+1)]%*%t(alpha*bij[2,]))-exp(nodei0[1:numbasi0]%*%t(alpha*bij[2,]))))) 
+  } 
+  if(dimyi>1)
+  {
+    for(k in 1:(dimyi-1))
+    {
+      nodeik=c(timepoint[k],nodei[nodei>timepoint[k]][which(nodei[nodei>timepoint[k]] %in% nodei[nodei<timepoint[k+1]])],timepoint[k+1])
+      numbasik=length(nodeik)-1
+      lownumbasik=sum(timepoint[k]>=nodei)
+      upnumbasik=sum(timepoint[k+1]>nodei)
+      Sijk=exp(colSums(-Cij[lownumbasik:upnumbasik,]/(matrix(rep(alpha*bij[2,],numbasik),byrow=T,nrow=numbasik))*
+                         (exp(nodeik[2:(numbasik+1)]%*%t(alpha*bij[2,]))-exp(nodeik[1:numbasik]%*%t(alpha*bij[2,])))))  
+      Wyijk=qt(pnorm((matrix(rep(data$prothrombin,m^2),ncol=m^2)-matrix(rep(Xi1%*%beta1+mu,m^2),ncol=m^2)-Zi1%*%bij)[k,]/sigma),df=nu)
+      mutijkconyibi=rhoty[k]*Wyijk
+      sigmatijkconyibi=sqrt((nu+Wyijk^2)*(1-rhoty[k]^2)/(nu+1))
+      Stijkconyibi=pt((qt(Sijk,df=nu)+mutijkconyibi)/sigmatijkconyibi,df=nu+1)
+      ftijkconyibi=ftijkconyibi*Stijkconyibi 
+    }
+  }
+  hijni=Cij[numbasi,]*exp(alpha*bij[2,]*ti)
+  if(ti!=timepoint[dimyi])
+  {
+    nodeini=c(timepoint[dimyi],nodei[nodei>timepoint[dimyi]][which(nodei[nodei>timepoint[dimyi]] %in% nodei[nodei<ti])],ti)
+    numbasini=length(nodeini)-1
+    lownumbasini=sum(timepoint[dimyi]>=nodei)
+    upnumbasini=numbasi
+    Sijni=exp(colSums(-Cij[lownumbasini:upnumbasini,]/(matrix(rep(alpha*bij[2,],numbasini),byrow=T,nrow=numbasini))*
+                        (exp(nodeini[2:(numbasini+1)]%*%t(alpha*bij[2,]))-exp(nodeini[1:numbasini]%*%t(alpha*bij[2,])))))
+    fijni=hijni*Sijni  
+    Wyijni=qt(pnorm((matrix(rep(data$prothrombin,m^2),ncol=m^2)-matrix(rep(Xi1%*%beta1+mu,m^2),ncol=m^2)-Zi1%*%bij)[dimyi,]/sigma),df=nu)
+    mutijniconyibi=rhoty[dimyi]*Wyijni
+    sigmatijniconyibi=sqrt((nu+Wyijni^2)*(1-rhoty[dimyi]^2)/(nu+1))
+    ftijniconyibi=indi*(dt((-qt(Sijni,df=nu)-mutijniconyibi)/sigmatijniconyibi,df=nu+1)/sigmatijniconyibi)*fijni/dt(-qt(Sijni,df=nu),df=nu)+
+      (1-indi)*pt((qt(Sijni,df=nu)+mutijniconyibi)/sigmatijniconyibi,df=nu+1)
+  } else {Sijni=1
+       ftijniconyibi=(1-event)*Sijni+event*hijni*Sijni}
+  fticonyi=sum(ftijkconyibi*ftijniconyibi*Sij0*wij)
+  fbiconyiti=fticonyibi*dmvnorm(bi,c(mubiconyi),Sigmabiconyi)/fticonyi
+  return(-fbiconyiti)
+}
+
+#posterior distribution of random effect bi, i.e., f(bi|ti,yi), for regular joint model (conditional independence)
+#This is essential rho(t)=0 under the bivariate functional Gaussain copula joint model
+fbiLCposuncor=function(beta1,beta2,D11,D22,D12,lambda,sigma,alpha,mupar,muord,data,dynati,bi,m,tmax)
+{
+  timepoint=data$time
+  ni=length(timepoint)
+  D=matrix(c(D11,D12,D12,D22),ncol=2)
+  a=GaussianHermite(m)[[2]]
+  w=GaussianHermite(m)[[1]]
+  Xi1=matrix(c(data$treat2),ncol=1)
+  Zi1=matrix(c(rep(1,ni),timepoint),ncol=2)
+  Xi2=c(unique(data$treat2))
+  mu=eval.basis(timepoint,create.bspline.basis(c(0,tmax),nbasis=length(mupar),norder=muord))%*%mupar
+  event=unique(data$cens)
+  obsti=unique(data$survival)
+  if(dynati<obsti) {indi=0
+  ti=dynati} else {indi=event
+  ti=obsti}
+  dimyi=sum(timepoint<=ti)
+  V11=matrix(Zi1[1:dimyi,],ncol=2)%*%D%*%t(matrix(Zi1[1:dimyi,],ncol=2))+sigma^2*diag(dimyi)
+  V22=D
+  V12=matrix(Zi1[1:dimyi,],ncol=2)%*%D
+  V21=t(V12)
+  mubiconyi=V21%*%solve(V11)%*%(data$prothrombin-Xi1%*%beta1-mu)[1:dimyi,]
+  Sigmabiconyi=V22-V21%*%solve(V11)%*%V12
+  Ci=c(lambda,lambda[length(lambda)])*exp(c(Xi2%*%beta2)+alpha*bi[1])
+  numbasi=sum(ti>seq(0,max(liver$survival),length=length(lambda)+1))           
+  nodei=c(seq(0,max(liver$survival),length=length(lambda)+1)[1:numbasi],ti)
+  ftikconyibi=1
+  Si0=1
+  if(timepoint[1]>0)
+  {
+    nodei0=c(0,nodei[nodei>0][which(nodei[nodei>0] %in% nodei[nodei<timepoint[1]])],timepoint[1])
+    numbasi0=length(nodei0)-1
+    lownumbasi0=sum(0>=nodei)
+    upnumbasi0=sum(timepoint[1]>nodei)
+    Si0=exp(sum(-Ci[lownumbasi0:upnumbasi0,]/(alpha*bi[2])*
+                  (exp(nodei0[2:(numbasi0+1)]*alpha*bi[2])-exp(nodei0[1:numbasi0]*alpha*bij[2])))) 
+  } 
+  if(dimyi>1)
+  {
+    for(k in 1:(dimyi-1))
+    {
+      nodeik=c(timepoint[k],nodei[nodei>timepoint[k]][which(nodei[nodei>timepoint[k]] %in% nodei[nodei<timepoint[k+1]])],timepoint[k+1])
+      numbasik=length(nodeik)-1
+      lownumbasik=sum(timepoint[k]>=nodei)
+      upnumbasik=sum(timepoint[k+1]>nodei)
+      Sik=exp(sum(-Ci[lownumbasik:upnumbasik]/(alpha*bi[2])*(exp(alpha*bi[2]*nodeik[2:(numbasik+1)])-exp(alpha*bi[2]*nodeik[1:numbasik]))))   
+      ftikconyibi=ftikconyibi*Sik
+    }
+  }
+  hini=Ci[numbasi]*exp(alpha*bi[2]*ti)
+  if(ti!=timepoint[dimyi])
+  {
+    nodeini=c(timepoint[dimyi],nodei[nodei>timepoint[dimyi]][which(nodei[nodei>timepoint[dimyi]] %in% nodei[nodei<ti])],ti)
+    numbasini=length(nodeini)-1
+    lownumbasini=sum(timepoint[dimyi]>=nodei)
+    upnumbasini=numbasi
+    Sini=exp(sum(-Ci[lownumbasini:upnumbasini]/(alpha*bi[2])*(exp(alpha*bi[2]*nodeini[2:(numbasini+1)])-exp(alpha*bi[2]*nodeini[1:numbasini]))))
+  } else {Sini=1}
+  fini=hini*Sini
+  ftiniconyibi=indi*fini+(1-indi)*Sini
+  fticonyibi=ftikconyibi*ftiniconyibi*Si0
+  ftijkconyibi=1
+  roti1=matrix(c(cos(pi/4),sin(pi/4),-sin(pi/4),cos(pi/4)),ncol=2)
+  roti=eigen(Sigmabiconyi)$vector%*%diag(sqrt(eigen(Sigmabiconyi)$value))%*%roti1
+  bij=sqrt(2)*roti%*%t(as.matrix(expand.grid(a,a)))+c(mubiconyi)
+  wij=expand.grid(w,w)[,1]*expand.grid(w,w)[,2]/pi
+  Cij=c(lambda,lambda[length(lambda)])%*%t(exp(c(Xi2%*%beta2)+alpha*bij[1,]))
+  Sij0=1
+  if(timepoint[1]>0)
+  {
+    nodei0=c(0,nodei[nodei>0][which(nodei[nodei>0] %in% nodei[nodei<timepoint[1]])],timepoint[1])
+    numbasi0=length(nodei0)-1
+    lownumbasi0=sum(0>=nodei)
+    upnumbasi0=sum(timepoint[1]>nodei)
+    Sij0=exp(colSums(-Cij[lownumbasi0:upnumbasi0,]/(matrix(rep(alpha*bij[2,],numbasi0),byrow=T,nrow=numbasi0))*
+                       (exp(nodei0[2:(numbasi0+1)]%*%t(alpha*bij[2,]))-exp(nodei0[1:numbasi0]%*%t(alpha*bij[2,]))))) 
+  } 
+  if(dimyi>1)
+  {
+    for(k in 1:(dimyi-1))
+    {
+      nodeik=c(timepoint[k],nodei[nodei>timepoint[k]][which(nodei[nodei>timepoint[k]] %in% nodei[nodei<timepoint[k+1]])],timepoint[k+1])
+      numbasik=length(nodeik)-1
+      lownumbasik=sum(timepoint[k]>=nodei)
+      upnumbasik=sum(timepoint[k+1]>nodei)
+      Sijk=exp(colSums(-Cij[lownumbasik:upnumbasik,]/(matrix(rep(alpha*bij[2,],numbasik),byrow=T,nrow=numbasik))*
+                         (exp(nodeik[2:(numbasik+1)]%*%t(alpha*bij[2,]))-exp(nodeik[1:numbasik]%*%t(alpha*bij[2,])))))  
+      ftijkconyibi=ftijkconyibi*Sijk
+    }
+  }
+  hijni=Cij[numbasi,]*exp(alpha*bij[2,]*ti)
+  if(ti!=timepoint[dimyi])
+  {
+    nodeini=c(timepoint[dimyi],nodei[nodei>timepoint[dimyi]][which(nodei[nodei>timepoint[dimyi]] %in% nodei[nodei<ti])],ti)
+    numbasini=length(nodeini)-1
+    lownumbasini=sum(timepoint[dimyi]>=nodei)
+    upnumbasini=numbasi
+    Sijni=exp(colSums(-Cij[lownumbasini:upnumbasini,]/(matrix(rep(alpha*bij[2,],numbasini),byrow=T,nrow=numbasini))*
+                        (exp(nodeini[2:(numbasini+1)]%*%t(alpha*bij[2,]))-exp(nodeini[1:numbasini]%*%t(alpha*bij[2,])))))
+  } else {Sijni=1}
+  fijni=hijni*Sijni  
+  ftijniconyibi=indi*fijni+(1-indi)*Sijni
+  fticonyi=sum(ftijkconyibi*ftijniconyibi*Sij0*wij)
+  fbiconyiti=fticonyibi*dmvnorm(bi,c(mubiconyi),Sigmabiconyi)/fticonyi
+  return(-fbiconyiti)
+}
+
+#"fbiLCposuncor.2" is equivalent to "fbiLCposuncor"
+fbiLCposuncor.2=function(beta1,beta2,D11,D22,D12,lambda,sigma,alpha,mupar,muord,data,dynati,bi,m,tmax)
+{
+  timepoint=data$time
+  ni=length(timepoint)
+  D=matrix(c(D11,D12,D12,D22),ncol=2)
+  a=GaussianHermite(m)[[2]]
+  w=GaussianHermite(m)[[1]]
+  Xi1=matrix(c(data$treat2),ncol=1)
+  Zi1=matrix(c(rep(1,ni),timepoint),ncol=2)
+  Xi2=c(unique(data$treat2))
+  mu=eval.basis(timepoint,create.bspline.basis(c(0,tmax),nbasis=length(mupar),norder=muord))%*%mupar
+  event=unique(data$cens)
+  obsti=unique(data$survival)
+  if(dynati<obsti) {indi=0
+  ti=dynati} else {indi=event
+  ti=obsti}
+  dimyi=sum(timepoint<=ti)
+  V11=matrix(Zi1[1:dimyi,],ncol=2)%*%D%*%t(matrix(Zi1[1:dimyi,],ncol=2))+sigma^2*diag(dimyi)
+  V22=D
+  V12=matrix(Zi1[1:dimyi,],ncol=2)%*%D
+  V21=t(V12)
+  mubiconyi=V21%*%solve(V11)%*%(data$prothrombin-Xi1%*%beta1-mu)[1:dimyi,]
+  Sigmabiconyi=V22-V21%*%solve(V11)%*%V12
+  Ci=c(lambda,lambda[length(lambda)])*exp(c(Xi2%*%beta2)+alpha*bi[1])
+  numbasi=sum(ti>seq(0,max(liver$survival),length=length(lambda)+1))           
+  nodei=c(seq(0,max(liver$survival),length=length(lambda)+1)[1:numbasi],ti)
+  Si=exp(sum(-Ci[1:numbasi]/(alpha*bi[2])*(exp(alpha*bi[2]*nodei[2:(numbasi+1)])-exp(alpha*bi[2]*nodei[1:numbasi]))))   
+  hi=Ci[numbasi]*exp(alpha*bi[2]*ti)
+  fi=hi*Si
+  fticonyibi=indi*fi+(1-indi)*Si
+  roti1=matrix(c(cos(pi/4),sin(pi/4),-sin(pi/4),cos(pi/4)),ncol=2)
+  roti=eigen(Sigmabiconyi)$vector%*%diag(sqrt(eigen(Sigmabiconyi)$value))%*%roti1
+  bij=sqrt(2)*roti%*%t(as.matrix(expand.grid(a,a)))+c(mubiconyi)
+  wij=expand.grid(w,w)[,1]*expand.grid(w,w)[,2]/pi
+  Cij=c(lambda,lambda[length(lambda)])%*%t(exp(c(Xi2%*%beta2)+alpha*bij[1,]))
+  Sij=exp(colSums(-Cij[1:numbasi,]/(matrix(rep(alpha*bij[2,],numbasi),byrow=T,nrow=numbasi))*
+                    (exp(nodei[2:(numbasi+1)]%*%t(alpha*bij[2,]))-exp(nodei[1:numbasi]%*%t(alpha*bij[2,])))))  
+  hij=Cij[numbasi,]*exp(alpha*bij[2,]*ti)
+  fij=hij*Sij  
+  ftijconyibi=indi*fij+(1-indi)*Sij
+  fticonyi=sum(ftijconyibi*wij)
+  fbiconyiti=fticonyibi*dmvnorm(bi,c(mubiconyi),Sigmabiconyi)/fticonyi
+  return(-fbiconyiti)
+}
+
+
+#maximise f(bi|ti,yi) to obtain hat^{bi} for bivaraite functional copula joint model
+dynaLCbi=function(beta1,beta2,D11,D22,D12,etapar,lambda,sigma,alpha,mupar,muord,etaord,data,dynati,m,tmax,mtool,copula,nu)
+{
+  timepoint=data$time
+  ni=length(timepoint)
+  D=matrix(c(D11,D12,D12,D22),ncol=2)
+  Xi1=matrix(c(data$treat2),ncol=1)
+  Zi1=matrix(c(rep(1,ni),timepoint),ncol=2)
+  Xi2=c(unique(data$treat2))
+  mu=eval.basis(timepoint,create.bspline.basis(c(0,tmax),nbasis=length(mupar),norder=muord))%*%mupar
+  obsti=unique(data$survival)
+  ti=min(dynati,obsti)
+  dimyi=sum(timepoint<=ti)
+  V11=matrix(Zi1[1:dimyi,],ncol=2)%*%D%*%t(matrix(Zi1[1:dimyi,],ncol=2))+sigma^2*diag(dimyi)
+  V22=D
+  V12=matrix(Zi1[1:dimyi,],ncol=2)%*%D
+  V21=t(V12)
+  mubiconyi=V21%*%solve(V11)%*%(data$prothrombin-Xi1%*%beta1-mu)[1:dimyi,]
+  if(copula=="Gaucop")
+  {
+    etaty=eval.basis(timepoint,create.bspline.basis(c(0,tmax),nbasis=length(etapar),norder=etaord))%*%etapar
+    rhoty=(exp(2*etaty)-1)/(exp(2*etaty)+1)
+    if(mtool=="nlm")
+    {
+      bihat=nlm(fbiLCposGau,p=c(mubiconyi),beta1=beta1,beta2=beta2,D11=D11,D22=D22,D12=D12,etapar=etapar,lambda=lambda,
+                sigma=sigma,alpha=alpha,mupar=mupar,muord=muord,etaord=etaord,data=data,dynati=dynati,m=m,tmax=tmax,
+                hessian=T,iterlim=10000)$est } else {
+                  bihat=optim(fbiLCposGau,p=c(mubiconyi),beta1=beta1,beta2=beta2,D11=D11,D22=D22,D12=D12,etapar=etapar,lambda=lambda,
+                              sigma=sigma,alpha=alpha,mupar=mupar,muord=muord,etaord=etaord,data=data,dynati=dynati,m=m,tmax=tmax,
+                              hessian=T,control=list(maxit=20000))$par }
+    
+  }
+  if(copula=="tcop")
+  {
+    etaty=eval.basis(timepoint,create.bspline.basis(c(0,tmax),nbasis=length(etapar),norder=etaord))%*%etapar
+    rhoty=(exp(2*etaty)-1)/(exp(2*etaty)+1)
+    if(mtool=="nlm")
+    {
+      bihat=nlm(fbiLCpostcop,p=c(mubiconyi),beta1=beta1,beta2=beta2,D11=D11,D22=D22,D12=D12,etapar=etapar,lambda=lambda,
+                sigma=sigma,alpha=alpha,mupar=mupar,muord=muord,etaord=etaord,data=data,dynati=dynati,m=m,tmax=tmax,nu=nu,
+                hessian=T,iterlim=10000)$est } else {
+                  bihat=optim(fbiLCpostcop,p=c(mubiconyi),beta1=beta1,beta2=beta2,D11=D11,D22=D22,D12=D12,etapar=etapar,lambda=lambda,
+                              sigma=sigma,alpha=alpha,mupar=mupar,muord=muord,etaord=etaord,data=data,dynati=dynati,m=m,tmax=tmax,nu=nu,
+                              hessian=T,control=list(maxit=20000))$par }
+  }
+  if(copula=="uncor")
+  {
+    if(mtool=="nlm")
+    {
+      bihat=nlm(fbiLCposuncor,p=c(mubiconyi),beta1=beta1,beta2=beta2,D11=D11,D22=D22,D12=D12,lambda=lambda,
+                sigma=sigma,alpha=alpha,mupar=mupar,muord=muord,data=data,dynati=dynati,m=m,tmax=tmax,
+                hessian=T,iterlim=10000)$est } else {
+                  bihat=optim(fbiLCposuncor,p=c(mubiconyi),beta1=beta1,beta2=beta2,D11=D11,D22=D22,D12=D12,lambda=lambda,
+                              sigma=sigma,alpha=alpha,mupar=mupar,muord=muord,data=data,dynati=dynati,m=m,tmax=tmax,
+                              hessian=T,control=list(maxit=20000))$par  }
+  }
+  if(copula=="uncor2")
+  {
+    if(mtool=="nlm")
+    {
+      bihat=nlm(fbiLCposuncor.2,p=c(mubiconyi),beta1=beta1,beta2=beta2,D11=D11,D22=D22,D12=D12,lambda=lambda,
+                sigma=sigma,alpha=alpha,mupar=mupar,muord=muord,data=data,dynati=dynati,m=m,tmax=tmax,
+                hessian=T,iterlim=10000)$est } else {
+                  bihat=optim(fbiLCposuncor.2,p=c(mubiconyi),beta1=beta1,beta2=beta2,D11=D11,D22=D22,D12=D12,lambda=lambda,
+                              sigma=sigma,alpha=alpha,mupar=mupar,muord=muord,data=data,dynati=dynati,m=m,tmax=tmax,
+                              hessian=T,control=list(maxit=20000))$par   }
+  }
+  results=list(bihat,c(mubiconyi))
+  return(results)
+}
+
+
+
+
+#predict survival probabilities of LC data
+predLCSur=function(beta1,beta2,D11,D22,D12,etapar,lambda,sigma,alpha,mupar,muord,etaord,data,dynati,predinterv,m,tmax,mtool,acc,copula,nu)
+{
+  timepoint=data$time
+  ni=length(timepoint)
+  D=matrix(c(D11,D12,D12,D22),ncol=2)
+  Xi1=matrix(c(data$treat2),ncol=1)
+  Zi1=matrix(c(rep(1,ni),timepoint),ncol=2)
+  Xi2=c(unique(data$treat2))
+  mu=eval.basis(timepoint,create.bspline.basis(c(0,tmax),nbasis=length(mupar),norder=muord))%*%mupar
+  obsti=unique(data$survival)
+  ti=seq(min(dynati,obsti),predinterv,by=acc)
+  dimyi=sum(timepoint<=min(dynati,obsti))
+  outbi=dynaLCbi(beta1=beta1,beta2=beta2,D11=D11,D22=D22,D12=D12,etapar=etapar,lambda=lambda,sigma=sigma,alpha=alpha,
+                  mupar=mupar,muord=muord,etaord=etaord,data=data,dynati=dynati,m=m,tmax=tmax,mtool=mtool,copula=copula,nu=nu)
+  hatbi=outbi[[1]]
+  hatbiconyi=outbi[[2]]
+  Ci=c(lambda,lambda[length(lambda)])*exp(c(Xi2%*%beta2)+alpha*hatbi[1])
+  node=seq(0,max(liver$survival),length=length(lambda)+1)
+  Sicon=0
+  for(k in 1:length(ti))
+  {
+    nodeik=c(timepoint[dimyi],node[node>timepoint[dimyi]][which(node[node>timepoint[dimyi]] %in% node[node<ti[k]])],ti[k])
+    numbasik=length(nodeik)-1
+    lownumbasik=sum(timepoint[dimyi]>=node)
+    upnumbasik=sum(ti[k]>node)
+    Cik=Ci[lownumbasik:upnumbasik]
+    Sicon[k]=exp(sum(-Cik/(alpha*hatbi[2])*(exp(alpha*hatbi[2]*nodeik[2:(numbasik+1)])-exp(alpha*hatbi[2]*nodeik[1:numbasik]))))  
+  }
+  if(copula=="Gaucop")
+  {
+    etaty=eval.basis(timepoint,create.bspline.basis(c(0,tmax),nbasis=length(etapar),norder=etaord))%*%etapar 
+    rhoty=(exp(2*etaty)-1)/(exp(2*etaty)+1)
+    Zyi=(data$prothrombin-Xi1%*%beta1-mu-Zi1%*%hatbi)[dimyi,]/sigma
+    muticonyibi=rhoty[dimyi]*Zyi
+    sigmaticonyibi=sqrt(1-rhoty[dimyi]^2)
+    predi=pnorm((qnorm(Sicon)+muticonyibi)/sigmaticonyibi)/pnorm((qnorm(Sicon[1])+muticonyibi)/sigmaticonyibi)
+  }
+  if (copula=="tcop")
+  {
+    etaty=eval.basis(timepoint,create.bspline.basis(c(0,tmax),nbasis=length(etapar),norder=etaord))%*%etapar 
+    rhoty=(exp(2*etaty)-1)/(exp(2*etaty)+1)
+    Wyi=qt(pnorm((data$prothrombin-Xi1%*%beta1-mu-Zi1%*%hatbi)[dimyi,]/sigma),df=nu)
+    muticonyibi=rhoty[dimyi]*Wyi
+    sigmaticonyibi=sqrt((nu+Wyi^2)*(1-rhoty[dimyi]^2)/(nu+1))
+    predi=pt((qt(Sicon,df=nu)+muticonyibi)/sigmaticonyibi,df=nu+1)/pt((qt(Sicon[1],df=nu)+muticonyibi)/sigmaticonyibi,df=nu+1)
+  }
+  if(copula=="uncor"|copula=="uncor2")
+  {
+    predi=Sicon/Sicon[1]
+  }
+  results=list(ti,Sicon/Sicon[1],predi,dimyi,hatbi,hatbiconyi)
+  return(results)
+}
+
+
+
+#calculate AUC and PE for LC data
+dynaLCsurgroup.cen=function(Data,beta1,beta2,D11,D22,D12,etapar,lambda,sigma,alpha,mupar,muord,etaord,dynati,predinterv,
+                             m,tmax,mtool,copula,nu)
+{
+  allprob=0
+  j=0
+  i=1
+  ind=0
+  obst=0
+  for (i in c(unique(Data$id)))
+  { 
+    Datai=Data[Data$id==i,]
+    obsti=unique(Datai$survival)
+    indi=unique(Datai$cens)
+    if(obsti>dynati)
+    {
+      j=j+1
+      allprob[j]=predLCSur(beta1=beta1,beta2=beta2,D11=D11,D22=D22,D12=D12,etapar=etapar,lambda=lambda,
+                            sigma=sigma,alpha=alpha,mupar=mupar,muord=muord,etaord=etaord,data=Datai,dynati=dynati,
+                            predinterv=predinterv,m=m,tmax=tmax,mtool=mtool,acc=predinterv-dynati,copula=copula,nu=nu)[[3]][-1]
+      ind[j]=indi;obst[j]=obsti
+    }
+  }
+  results=list(j,allprob,ind,obst)
+  return(results)
+}
+
+dynaAUC.cen=function(probs,ind,obst,dynati,predinterv)
+{
+  upcount=0;lowcount=0
+  for(i in 1:length(probs))
+  {
+    if(obst[i]<=predinterv&obst[i]>dynati&ind[i]==1)
+    {
+      upcount=sum((obst>predinterv)*(probs[i]<probs))+sum((obst>obst[i]&obst<=predinterv&ind==0)*(probs[i]<probs)*probs)+
+        upcount
+      lowcount=sum(obst>predinterv)+sum((obst>obst[i]&obst<=predinterv&ind==0)*probs)+lowcount
+    }
+    if(obst[i]<=predinterv&obst[i]>dynati&ind[i]==0)
+    {
+      upcount=sum((obst>predinterv)*(probs[i]<probs)*(1-probs[i]))+
+        sum((obst>obst[i]&obst<=predinterv&ind==0)*(probs[i]<probs)*(1-probs[i])*probs)+upcount
+      lowcount=sum((obst>predinterv)*(1-probs[i]))+sum((obst>obst[i]&obst<=predinterv&ind==0)*(1-probs[i])*probs)+
+        lowcount
+    }
+  }
+  return(upcount/lowcount)
+}
+
+
+dynaBS.cen=function(probs,ind,obst,dynati,predinterv)
+{
+  upcount=sum((obst>predinterv)*(1-probs)^2+ind*(obst<predinterv)*(0-probs)^2+(1-ind)*(obst<predinterv)*
+                (probs*(1-probs)^2+(1-probs)*(0-probs)^2))
+  lowcount=sum(obst>dynati)
+  return(upcount/lowcount)
+}
+
