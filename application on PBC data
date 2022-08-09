@@ -966,7 +966,7 @@ dynaBS.cen=function(probs,ind,obst,dynati,predinterv)
 }
 
 
-#Conduct leave one out cross validation
+#Estimate parameter by leave one out cross validation
 PBC.funparest.leaveoneout=function(theta,nu,m,N)
 {
   estmatrixGau.muBS4.etaBS5=NULL
