@@ -969,54 +969,54 @@ dynaBS.cen=function(probs,ind,obst,dynati,predinterv)
 #Estimate parameter by leave one out cross validation
 PBC.funparest.leaveoneout=function(theta,nu,m,N)
 {
+  estmatrixGau.muBS4.uncor=NULL
   estmatrixGau.muBS4.etaBS5=NULL
   estmatrixtcop.muBS4.etaBS5=NULL
-  estmatrixGau.muBS4.uncor=NULL
+  gradmatrixGau.muBS4.uncor=NULL
   gradmatrixGau.muBS4.etaBS5=NULL
   gradmatrixtcop.muBS4.etaBS5=NULL
-  gradmatrixGau.muBS4.uncor=NULL
   loglikmatrix=NULL
   codematrix=NULL
   itermatrix=NULL
   for(i in 1:N)
   {
     fitdata=pbc2[pbc2$id!=i,]
-    estGHObGau.muBS4.etaBS5=nlm(f=appPBCbivGaucoploglik.funrhoty.mu,p=c(theta[1:9],rep(0,5),theta[10:22]),data=fitdata,
-                        neta=5,nmu=4,etaord=5,muord=4,nlam=7,tmax=max(pbc2$year),m=m,hessian=T,iterlim=2000)
-    estGHObtcop.muBS4.etaBS5=nlm(f=appPBCbivtcoploglik.funrhoty.mu,p=c(theta[1:9],rep(0,5),theta[10:22]),data=fitdata,
-                        neta=5,nmu=4,etaord=5,muord=4,nlam=7,tmax=max(pbc2$year),nu=nu,m=m,hessian=T,iterlim=2000)
     estGHObGau.muBS4.uncor=nlm(f=appPBCbivGaucoploglik.uncor.funmu,p=theta,data=fitdata,m=m,hessian=T,iterlim=2000,
-                        nmu=4,muord=4,nlam=7,tmax=max(pbc2$year))
+                               nmu=4,muord=4,nlam=7,tmax=max(pbc2$year))
+    estGHObGau.muBS4.etaBS5=nlm(f=appPBCbivGaucoploglik.funrhoty.mu,p=c(estGHObGau.muBS4.uncor$est[1:9],rep(0,5),estGHObGau.muBS4.uncor$est[10:22]),
+                                data=fitdata,neta=5,nmu=4,etaord=5,muord=4,nlam=7,tmax=max(pbc2$year),m=m,hessian=T,iterlim=2000)
+    estGHObtcop.muBS4.etaBS5=nlm(f=appPBCbivtcoploglik.funrhoty.mu,p=c(estGHObGau.muBS4.uncor$est[1:9],rep(0,5),estGHObGau.muBS4.uncor$est[10:22]),
+                                data=fitdata,neta=5,nmu=4,etaord=5,muord=4,nlam=7,tmax=max(pbc2$year),nu=nu,m=m,hessian=T,iterlim=2000)
+    estmatrixGau.muBS4.uncor=rbind(estmatrixGau.muBS4.uncor,estGHObGau.muBS4.uncor$estimate)
     estmatrixGau.muBS4.etaBS5=rbind(estmatrixGau.muBS4.etaBS5,estGHObGau.muBS4.etaBS5$estimate)
     estmatrixtcop.muBS4.etaBS5=rbind(estmatrixtcop.muBS4.etaBS5,estGHObtcop.muBS4.etaBS5$estimate)
-    estmatrixGau.muBS4.uncor=rbind(estmatrixGau.muBS4.uncor,estGHObGau.muBS4.uncor$estimate)
+    gradmatrixGau.muBS4.uncor=rbind(gradmatrixGau.muBS4.uncor,estGHObGau.muBS4.uncor$gradient)
     gradmatrixGau.muBS4.etaBS5=rbind(gradmatrixGau.muBS4.etaBS5,estGHObGau.muBS4.etaBS5$gradient)
     gradmatrixtcop.muBS4.etaBS5=rbind(gradmatrixtcop.muBS4.etaBS5,estGHObtcop.muBS4.etaBS5$gradient)
-    gradmatrixGau.muBS4.uncor=rbind(gradmatrixGau.muBS4.uncor,estGHObGau.muBS4.uncor$gradient)
-    loglikmatrix=rbind(loglikmatrix,c(-estGHObGau.muBS4.etaBS5$minimum,-estGHObtcop.muBS4.etaBS5$minimum,
-                                      -estGHObGau.muBS4.uncor$minimum))
-    codematrix=rbind(codematrix,c(estGHObGau.muBS4.etaBS5$code,estGHObtcop.muBS4.etaBS5$code,
-                                  estGHObGau.muBS4.uncor$code))
-    itermatrix=rbind(itermatrix,c(estGHObGau.muBS4.etaBS5$iter,estGHObtcop.muBS4.etaBS5$iter,
-                                  estGHObGau.muBS4.uncor$iter))
+    loglikmatrix=rbind(loglikmatrix,c(-estGHObGau.muBS4.uncor$minimum,-estGHObGau.muBS4.etaBS5$minimum,
+                                      -estGHObtcop.muBS4.etaBS5$minimum))
+    codematrix=rbind(codematrix,c(estGHObGau.muBS4.uncor$code,estGHObGau.muBS4.etaBS5$code,
+                                  estGHObtcop.muBS4.etaBS5$code))
+    itermatrix=rbind(itermatrix,c(estGHObGau.muBS4.uncor$iter,estGHObGau.muBS4.etaBS5$iter,
+                                  estGHObtcop.muBS4.etaBS5$iter))
     print(i)
   }
-  colnames(gradmatrixGau.muBS4.etaBS5)=c('gbeta11','gbeta21','gbeta31','gbeta12','gbeta22','gbeta32',
-                                      'gD11','gD22','gD12',rep('getapar',5),rep('glambda',7),'gsigma','galpha',rep('gmupar',4))
-  colnames(estmatrixGau.muBS4.etaBS5)=c('beta11','beta21','beta31','beta12','beta22','beta32',
-                                      'D11','D22','D12',rep('etapar',5),rep('lambda',7),'sigma','alpha',rep('mupar',4))
-  colnames(gradmatrixtcop.muBS4.etaBS5)=c('gbeta11','gbeta21','gbeta31','gbeta12','gbeta22','gbeta32',
-                                      'gD11','gD22','gD12',rep('getapar',5),rep('glambda',7),'gsigma','galpha',rep('gmupar',4))
-  colnames(estmatrixtcop.muBS4.etaBS5)=c('beta11','beta21','beta31','beta12','beta22','beta32',
-                                       'D11','D22','D12',rep('etapar',5),rep('lambda',7),'sigma','alpha',rep('mupar',4))
   colnames(gradmatrixGau.muBS4.uncor)=c('gbeta11','gbeta21','gbeta31','gbeta12','gbeta22','gbeta32',
                                         'gD11','gD22','gD12',rep('glambda',7),'gsigma','galpha',rep('gmupar',4))
   colnames(estmatrixGau.muBS4.uncor)=c('beta11','beta21','beta31','beta12','beta22','beta32',
                                        'D11','D22','D12',rep('lambda',7),'sigma','alpha',rep('mupar',4))
-  results=list(gradmatrixGau.muBS4.etaBS5,gradmatrixtcop.muBS4.etaBS5,gradmatrixGau.muBS4.uncor,
-               estmatrixGau.muBS4.etaBS5,estmatrixtcop.muBS4.etaBS5,estmatrixGau.muBS4.uncor,
-               colMeans(estmatrixGau.muBS4.etaBS5),colMeans(estmatrixtcop.muBS4.etaBS5),
-               colMeans(estmatrixGau.muBS4.uncor),loglikmatrix,codematrix,itermatrix)
+  colnames(gradmatrixGau.muBS4.etaBS5)=c('gbeta11','gbeta21','gbeta31','gbeta12','gbeta22','gbeta32',
+                                         'gD11','gD22','gD12',rep('getapar',5),rep('glambda',7),'gsigma','galpha',rep('gmupar',4))
+  colnames(estmatrixGau.muBS4.etaBS5)=c('beta11','beta21','beta31','beta12','beta22','beta32',
+                                        'D11','D22','D12',rep('etapar',5),rep('lambda',7),'sigma','alpha',rep('mupar',4))
+  colnames(gradmatrixtcop.muBS4.etaBS5)=c('gbeta11','gbeta21','gbeta31','gbeta12','gbeta22','gbeta32',
+                                          'gD11','gD22','gD12',rep('getapar',5),rep('glambda',7),'gsigma','galpha',rep('gmupar',4))
+  colnames(estmatrixtcop.muBS4.etaBS5)=c('beta11','beta21','beta31','beta12','beta22','beta32',
+                                         'D11','D22','D12',rep('etapar',5),rep('lambda',7),'sigma','alpha',rep('mupar',4))
+  results=list(gradmatrixGau.muBS4.uncor,gradmatrixGau.muBS4.etaBS5,gradmatrixtcop.muBS4.etaBS5,
+               estmatrixGau.muBS4.uncor,estmatrixGau.muBS4.etaBS5,estmatrixtcop.muBS4.etaBS5,
+               colMeans(estmatrixGau.muBS4.uncor),colMeans(estmatrixGau.muBS4.etaBS5),
+               colMeans(estmatrixtcop.muBS4.etaBS5),loglikmatrix,codematrix,itermatrix)
   return(results)
 }
 
