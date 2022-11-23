@@ -59,6 +59,8 @@ GaussianHermite=function(r)               #function for generating Gaussian herm
 
 
 
+
+
 #A simulation study with unbalanced measurement time    t copula and Gaussian copula
 #generate data with functional correlation rho(t)
 Y.bivcopjoineR.rho.BS.unb=function(beta1,beta2,n,sigma,var.random,lambda,alpha,etapar,rate,trprob,error,
@@ -70,7 +72,7 @@ Y.bivcopjoineR.rho.BS.unb=function(beta1,beta2,n,sigma,var.random,lambda,alpha,e
   G.sqrt=G.eigen$vectors%*%diag(sqrt(G.eigen$values))%*%t(G.eigen$vectors)
   for(subj in 1:n)
   {
-    obsposi=c(1,rbinom((mi-1),1,obsprob))>0
+    obsposi=c(1,rbinom((mi-1),1,obsprob))>0               #The probabilities for having observation at time s_ij
     jit=runif((mi-1),min=-error,max=error)
     timepoint=c(schedule[1],schedule[2:mi]+jit)[obsposi]
     etaty=eval.basis(timepoint,create.bspline.basis(c(0,tmax+0.2),norder=etaord,nbasis=length(etapar)))%*%etapar
@@ -230,7 +232,8 @@ appGQbivGaucoploglik.funrhoty=function(theta,data,m,tmax,neta,etaord)
   return(-ll)
 }
 
-#Estimate by etaty=0, which means conditional independence between the two sub-models
+#Estimate by etaty=0 under the bivariate functional Gaussian copula joint model, 
+#which means conditional independence between the two sub-models
 appGQbivGaucoploglik.0rhoty=function(theta,data,m)        
 {
   beta1=theta[1:6]
@@ -299,7 +302,7 @@ appGQbivGaucoploglik.0rhoty=function(theta,data,m)
 }
 
 
-#loglikelihood equivalent to etaty=0 as in "appGQbivGaucoploglik.0rhoty"
+#Another way of loglikelihood equivalent to etaty=0 as in "appGQbivGaucoploglik.0rhoty" (conditional independence between the two sub-models)
 appGQbivGaucoploglik.uncor=function(theta,data,m)        
 {
   beta1=theta[1:6]
@@ -482,7 +485,7 @@ EstY.bivcop.funrhoty.nlm=function(initpara,truepara,N,Jointdata,tmax,neta,m,etao
       estGHOb=nlm(f=appGQbivGaucoploglik.funrhoty,p=initpara,data=Jointdata[[i]],m=m,tmax=tmax,
                   hessian=T,neta=neta,etaord=etaord,iterlim=1000)
     }
-    if(copula=="uncor")
+    if(copula=="uncor")                        #copula=="uncor" and copula=="uncor2" should produce the same parameter estimations
     {
       estGHOb=nlm(f=appGQbivGaucoploglik.0rhoty,p=initpara,data=Jointdata[[i]],m=m,hessian=T,iterlim=1000)
     }
@@ -736,7 +739,7 @@ fbiposuncor=function(beta1,beta2,D11,D22,D12,lambda,sigma,alpha,data,dynati,bi,m
 }
 
 
-#maximise f(bi|ti,yi) to obtain hat^{bi} for bivaraite copula joint model
+#maximise f(bi|ti,yi) to obtain hat^{bi} for the bivaraite copula joint model
 dynabi=function(beta1,beta2,D11,D22,D12,etapar,lambda,sigma,alpha,etaord,data,dynati,m,tmax,copula,nu,mtool)
 {
   timepoint=data$ti
@@ -781,7 +784,7 @@ dynabi=function(beta1,beta2,D11,D22,D12,etapar,lambda,sigma,alpha,etaord,data,dy
     bihat=nlm(fbiposuncor,p=c(mubiconyi),beta1=beta1,beta2=beta2,D11=D11,D22=D22,D12=D12,lambda=lambda,
               sigma=sigma,alpha=alpha,data=data,dynati=dynati,m=m,hessian=T,iterlim=10000)$est
     } else{
-      optim(fbiposuncor,p=c(mubiconyi),beta1=beta1,beta2=beta2,D11=D11,D22=D22,D12=D12,lambda=lambda,
+      bihat=optim(fbiposuncor,p=c(mubiconyi),beta1=beta1,beta2=beta2,D11=D11,D22=D22,D12=D12,lambda=lambda,
           sigma=sigma,alpha=alpha,data=data,dynati=dynati,m=m,hessian=T,control=list(maxit=20000))$par
     }
   }
