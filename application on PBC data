@@ -106,7 +106,7 @@ appPBCbivGaucoploglik.funrhoty.mu=function(theta,data,m,neta,nmu,etaord,muord,nl
   if(sigma>0&sum(lambda>rep(0,nlam))==nlam&is.positive.definite(D)>0)
   {
     ll=0
-    for(sub in 1:n)
+    for(sub in unique(data$id))
     {
       timepoint=data$year[data$id==sub]
       etaty=eval.basis(timepoint,create.bspline.basis(c(0,tmax),nbasis=neta,norder=etaord))%*%etapar
@@ -178,7 +178,7 @@ appPBCbivGaucoploglik.funrhoty.mu=function(theta,data,m,neta,nmu,etaord,muord,nl
   return(-ll)
 }
 
-#log-likelihood for the regular joint model.
+#log-likelihood for the regular joint model by make rhoty=0 in the functional bivariate Gaussian copula joint model
 appPBCbivGaucoploglik.0rhoty.funmu=function(theta,data,m,nmu,muord,nlam,tmax)
 {
   beta1=theta[1:3]
@@ -198,7 +198,7 @@ appPBCbivGaucoploglik.0rhoty.funmu=function(theta,data,m,nmu,muord,nlam,tmax)
   if(sigma>0&sum(lambda>rep(0,nlam))==nlam&is.positive.definite(D)>0)
   {
     ll=0
-    for(sub in 1:n)
+    for(sub in unique(data$id))
     {
       timepoint=data$year[data$id==sub]
       ni=length(timepoint)
@@ -260,7 +260,7 @@ appPBCbivGaucoploglik.0rhoty.funmu=function(theta,data,m,nmu,muord,nlam,tmax)
 }
 
 
-#log-likelihood for the regular joint model, this is equivalent to "appPBCbivGaucoploglik.0rhoty.funmu"
+#another way of log-likelihood for the regular joint model, this is equivalent to "appPBCbivGaucoploglik.0rhoty.funmu"
 appPBCbivGaucoploglik.uncor.funmu=function(theta,data,m,nmu,muord,nlam,tmax)
 {
   beta1=theta[1:3]
@@ -280,7 +280,7 @@ appPBCbivGaucoploglik.uncor.funmu=function(theta,data,m,nmu,muord,nlam,tmax)
   if(sigma>0&sum(lambda>rep(0,nlam))==nlam&is.positive.definite(D)>0)
   {
     ll=0
-    for(sub in 1:n)
+    for(sub in unique(data$id))
     {
       timepoint=data$year[data$id==sub]
       ni=length(timepoint)
@@ -342,7 +342,7 @@ appPBCbivtcoploglik.funrhoty.mu=function(theta,data,m,neta,nmu,etaord,muord,nlam
   if(sigma>0&sum(lambda>rep(0,nlam))==nlam&is.positive.definite(D)>0)
   {
     ll=0
-    for(sub in 1:n)
+    for(sub in unique(data$id))
     {
       timepoint=data$year[data$id==sub]
       etaty=eval.basis(timepoint,create.bspline.basis(c(0,tmax),nbasis=neta,norder=etaord))%*%etapar
@@ -967,7 +967,7 @@ dynaBS.cen=function(probs,ind,obst,dynati,predinterv)
 }
 
 
-#Estimate parameter by leave one out cross validation
+#Estimate parameter by leave one out cross validation but this takes a very long time
 PBC.funparest.leaveoneout=function(theta,nu,m,N)
 {
   estmatrixGau.muBS4.uncor=NULL
